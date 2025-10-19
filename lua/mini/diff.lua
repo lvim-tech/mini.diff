@@ -782,24 +782,80 @@ MiniDiff.goto_hunk = function(direction, opts)
   if type(opts.line_start) ~= 'number' then H.error('`opts.line_start` should be number.') end
   if type(opts.wrap) ~= 'boolean' then H.error('`opts.wrap` should be boolean.') end
 
-  -- Prepare ranges to iterate.
-  local ranges = H.get_contiguous_hunk_ranges(buf_cache.hunks)
-  if #ranges == 0 then return H.notify('No hunks to go to', 'INFO') end
+  -- New behavior: navigate between individual hunks (not merged contiguous ranges).
+  -- Build sorted list of hunks (per-hunk) and navigate by hunk starts.
+  local hunks = vim.deepcopy(buf_cache.hunks or {})
+  if #hunks == 0 then return H.notify('No hunks to go to', 'INFO') end
+  table.sort(hunks, H.hunk_order)
 
-  -- Iterate
-  local res_ind, did_wrap = H.iterate_hunk_ranges(ranges, direction, opts)
-  if res_ind == nil then return H.notify('No hunk ranges in direction ' .. vim.inspect(direction), 'INFO') end
-  local res_line = ranges[res_ind].from
+  local starts = {}
+  for _, h in ipairs(hunks) do
+    local from, _ = H.get_hunk_buf_range(h)
+    table.insert(starts, from)
+  end
+
+  local n = #starts
+  local cur_line = opts.line_start
+
+  -- Helpers to find initial indices relative to current line.
+  local function find_next_index()
+    for i = 1, n do
+      if starts[i] > cur_line then return i end
+    end
+    return nil
+  end
+  local function find_prev_index()
+    for i = n, 1, -1 do
+      if starts[i] < cur_line then return i end
+    end
+    return nil
+  end
+
+  local res_ind, did_wrap = nil, false
+
+  if direction == 'first' then
+    res_ind = 1
+  elseif direction == 'last' then
+    res_ind = n
+  elseif direction == 'next' then
+    local init = find_next_index()
+    if not init then
+      if not opts.wrap then
+        return H.notify('No hunk ranges in direction ' .. vim.inspect(direction), 'INFO')
+      end
+      init = 1
+    end
+    -- advance n_times hunks forward from init (init is the first > cur_line)
+    res_ind = init + (opts.n_times - 1)
+  elseif direction == 'prev' then
+    local init = find_prev_index()
+    if not init then
+      if not opts.wrap then
+        return H.notify('No hunk ranges in direction ' .. vim.inspect(direction), 'INFO')
+      end
+      init = n
+    end
+    -- advance n_times hunks backward from init (init is the last < cur_line)
+    res_ind = init - (opts.n_times - 1)
+  end
+
+  -- Handle wrapping and detect if wrap occurred
+  if not opts.wrap then
+    if res_ind < 1 or res_ind > n then
+      return H.notify('No hunk ranges in direction ' .. vim.inspect(direction), 'INFO')
+    end
+  else
+    if res_ind < 1 or res_ind > n then did_wrap = true end
+    res_ind = ((res_ind - 1) % n) + 1
+  end
+
+  local res_line = starts[res_ind]
   if did_wrap then H.notify('Wrapped around edge in direction ' .. vim.inspect(direction), 'INFO') end
 
-  -- Add to jumplist
+  -- Add to jumplist and jump to the line (preserving original behavior)
   vim.cmd([[normal! m']])
-
-  -- Jump
   local _, col = vim.fn.getline(res_line):find('^%s*')
   vim.api.nvim_win_set_cursor(0, { res_line, col })
-
-  -- Open just enough folds
   vim.cmd('normal! zv')
 end
 
